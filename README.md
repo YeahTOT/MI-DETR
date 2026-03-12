@@ -196,6 +196,28 @@ For other datasets, switch:
 - `--dataset-root`
 - `--data` if needed
 
+## Single-Image Prediction
+
+Use `pred.py` for one-image inference with released checkpoints. The input path must point to an appearance image under
+an `images/` directory, and the script will automatically look up the paired motion image under the matching `image/`
+path with the same file name.
+
+```bash
+python pred.py \
+  --weights checkpoints/DAUB-R.pt \
+  --source /path/to/DAUB-R_retina/images/test/000001.png \
+  --device 0 \
+  --imgsz 512 \
+  --conf 0.25 \
+  --name daub-r_pred
+```
+
+Outputs are saved to `runs/pred/<name>` and include:
+
+- annotated prediction images from the appearance and motion branches
+- a JSON file with class IDs, class names, confidence scores, and pixel-space `xyxy` boxes
+- terminal summaries of the detections
+
 ## Reproducibility Notes
 
 To stay close to the paper setting:

@@ -10,6 +10,7 @@ from .dataset import (
     YOLODataset,
     YOLOMultiModalDataset,
 )
+from .motion_map import MotionMapConfig, OnnxMotionMapModule, generate_sequence
 
 __all__ = (
     "BaseDataset",
@@ -19,8 +20,11 @@ __all__ = (
     "YOLOMultiModalDataset",
     "YOLOConcatDataset",
     "GroundingDataset",
+    "MotionMapConfig",
+    "OnnxMotionMapModule",
     "build_yolo_dataset",
     "build_grounding",
     "build_dataloader",
+    "generate_sequence",
     "load_inference_source",
 )

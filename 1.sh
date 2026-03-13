@@ -21,6 +21,7 @@ python video_onnx_stream.py \
 
 
 python motion_map.py \
-  --source-root datasets/test/1/ir_周四022603_113902_11044_16195_25.0/images \
-  --output-root datasets/test/1/ir_周四022603_113902_11044_16195_25.0/image \
-  --recursive
+  --source-root datasets/DAUB-R_retina/images \
+  --output-root datasets/DAUB-R_retina/image_onnx \
+  --recursive \
+  --mode onnx

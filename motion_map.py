@@ -12,6 +12,9 @@ from tqdm import tqdm
 
 
 def _load_motion_map_module():
+    # CLI 文件放在仓库根目录，而实际实现位于 ultralytics/data/motion_map.py。
+    # 这里显式按路径加载模块，可以避免依赖包安装方式或 PYTHONPATH 配置。
+    # 这样脚本既能直接 `python motion_map.py` 运行，也不会和其他同名模块冲突。
     module_path = Path(__file__).resolve().parent / "ultralytics" / "data" / "motion_map.py"
     spec = importlib.util.spec_from_file_location("motion_map_cli_impl", module_path)
     module = importlib.util.module_from_spec(spec)
@@ -26,10 +29,15 @@ MOTION_MAP = _load_motion_map_module()
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate motion maps for MI-DETR.")
+    # source-root 指向外观图像目录，脚本会从这里读取原始帧。
     parser.add_argument("--source-root", required=True, help="Appearance-image root, usually an images/ directory.")
+    # output-root 指向 motion map 输出目录，输出路径会尽量保持与 source-root 相同的相对结构。
     parser.add_argument("--output-root", required=True, help="Output root, usually an image/ directory.")
+    # reference 使用参考实现整段处理，onnx 使用逐帧递推实现，便于与导出的 ONNX 行为对齐。
     parser.add_argument("--mode", choices=("reference", "onnx"), default="reference", help="Generation backend.")
+    # recursive 打开后，会递归遍历 source-root 下的所有子目录。
     parser.add_argument("--recursive", action="store_true", help="Traverse source-root recursively.")
+    # 默认保存为 3 通道 PNG，方便与常见视觉工具和数据管线兼容。
     parser.add_argument("--save-rgb", dest="save_rgb", action="store_true", help="Save motion camaps as 3-channel PNGs.")
     parser.add_argument(
         "--no-save-rgb",
@@ -37,18 +45,26 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Save motion maps as single-channel PNGs.",
     )
+    # 默认值显式放在这里，便于和 --no-save-rgb 对读。
     parser.set_defaults(save_rgb=True)
     return parser.parse_args()
 
 
 def run_reference(groups: list[tuple[Path, list[Path]]], source_root: Path, output_root: Path, save_rgb: bool) -> int:
+    # reference 路径按“目录分组”整段处理：
+    # 1. 整组读入灰度帧
+    # 2. 一次性生成整段 motion map
+    # 3. 再逐张写回磁盘
     written = 0
     total = sum(len(image_paths) for _, image_paths in groups)
     with tqdm(total=total, desc="Generating motion maps", unit="image") as progress:
         for _, image_paths in groups:
+            # frames 形状为 [T, 1, H, W]，T 是当前目录下的帧数。
             frames = MOTION_MAP.load_grayscale_frames(image_paths)
+            # generate_sequence 会在内部维护前一帧状态，输出同长度的 motion map 序列。
             motion_maps = MOTION_MAP.generate_sequence(frames)
             for image_path, motion_map in zip(image_paths, motion_maps):
+                # 输出目录保持和输入目录一致的相对路径，方便直接替换数据根目录使用。
                 target = output_root / image_path.relative_to(source_root)
                 MOTION_MAP.save_motion_image(target, motion_map, save_rgb=save_rgb)
                 written += 1
@@ -57,6 +73,8 @@ def run_reference(groups: list[tuple[Path, list[Path]]], source_root: Path, outp
 
 
 def run_onnx(groups: list[tuple[Path, list[Path]]], source_root: Path, output_root: Path, save_rgb: bool) -> int:
+    # onnx 路径改成“逐帧递推”：
+    # 每次只输入当前帧和上一时刻状态，输出当前 motion map 与下一时刻状态。
     written = 0
     module = MOTION_MAP.OnnxMotionMapModule().eval()
     with torch.no_grad():
@@ -64,11 +82,16 @@ def run_onnx(groups: list[tuple[Path, list[Path]]], source_root: Path, output_ro
         with tqdm(total=total, desc="Generating motion maps", unit="image") as progress:
             for _, image_paths in groups:
                 frames = MOTION_MAP.load_grayscale_frames(image_paths)
+                # adapt_state 这个历史命名沿用了导出接口的设计，
+                # 实际内容是上一帧 contrast，而不是适应层输出。
                 adapt_state = torch.zeros_like(frames[:1])
+                # memory_state 保存上一时刻的时间记忆图。
                 memory_state = torch.zeros_like(frames[:1])
+                # state_valid=0 表示当前还没有历史状态，第一帧需要走首帧初始化逻辑。
                 state_valid = torch.zeros((1, 1, 1, 1), dtype=frames.dtype)
 
                 for image_path, frame in zip(image_paths, frames):
+                    # 单帧输入从 [1, H, W] 补成 [1, 1, H, W]，与模块 forward 对齐。
                     motion_map, adapt_state, memory_state = module(
                         frame.unsqueeze(0),
                         adapt_state,
@@ -76,7 +99,9 @@ def run_onnx(groups: list[tuple[Path, list[Path]]], source_root: Path, output_ro
                         state_valid,
                     )
                     target = output_root / image_path.relative_to(source_root)
+                    # forward 返回的是带 batch 维的结果，这里 squeeze 回单张图再保存。
                     MOTION_MAP.save_motion_image(target, motion_map.squeeze(0), save_rgb=save_rgb)
+                    # 第一帧处理结束后，后续帧都可以使用有效历史状态。
                     state_valid.fill_(1.0)
                     written += 1
                     progress.update(1)
@@ -84,6 +109,13 @@ def run_onnx(groups: list[tuple[Path, list[Path]]], source_root: Path, output_ro
 
 
 def main() -> None:
+    # 总调度顺序：
+    # 1. 解析命令行
+    # 2. 规范化输入输出路径
+    # 3. 收集并按目录分组图片
+    # 4. 检查目录布局是否会导致状态错误复用
+    # 5. 根据 mode 选择 reference / onnx 后端
+    # 6. 输出汇总信息
     args = parse_args()
     source_root = Path(args.source_root).expanduser().resolve()
     output_root = Path(args.output_root).expanduser().resolve()

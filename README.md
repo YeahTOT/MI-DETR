@@ -251,6 +251,27 @@ Notes:
 - `video.py` remains the entry point for PyTorch checkpoints and MP4-based workflows.
 - ONNX inference depends on both `onnx` and `onnxruntime`.
 
+## ONNX Streaming Prediction
+
+Use `video_onnx_stream.py` when you want to simulate the real streaming path: each frame first updates the recurrent
+motion state, then immediately runs ONNX detection on the current frame.
+
+```bash
+python video_onnx_stream.py \
+  --weights checkpoints/DAUB-R.onnx \
+  --source datasets/infers/1 \
+  --conf 0.25 \
+  --name daub-r_onnx_stream
+
+```
+
+Notes:
+
+- `video_onnx_stream.py` only supports frame directories.
+- `video_onnx.py` generates motion maps for the whole sequence first, then runs batched prediction.
+- `video_onnx_stream.py` generates motion maps frame by frame and resets motion state when it enters a new subdirectory.
+- Outputs are saved as annotated images under `images/` and frame-level JSON under `json/`.
+
 ## Reproducibility Notes
 
 To stay close to the paper setting:

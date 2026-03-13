@@ -15,7 +15,12 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run MI-DETR ONNX inference for frame directories.")
     parser.add_argument("--weights", default=DEFAULT_WEIGHTS, help="ONNX checkpoint path.")
     parser.add_argument("--source", required=True, help="Frame directory path.")
-    parser.add_argument("--motion-mode", choices=("reference", "onnx"), default="reference", help="Motion-map backend.")
+    parser.add_argument(
+        "--motion-mode",
+        choices=("reference", "paper_onnx", "onnx_approx"),
+        default="reference",
+        help="Motion-map backend.",
+    )
     parser.add_argument("--recursive", action="store_true", help="Recursively scan frame directories.")
     parser.add_argument("--device", default="", help="Prediction device, e.g. '0'.")
     parser.add_argument("--imgsz", type=int, default=512, help="Input image size.")

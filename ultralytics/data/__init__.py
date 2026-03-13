@@ -10,7 +10,15 @@ from .dataset import (
     YOLODataset,
     YOLOMultiModalDataset,
 )
-from .motion_map import MotionMapConfig, OnnxMotionMapModule, generate_sequence
+from .motion_map import (
+    MotionMapConfig,
+    OnnxApproxMotionMapModule,
+    OnnxMotionMapCoreModule,
+    OnnxMotionMapModule,
+    generate_onnx_approx_sequence,
+    generate_paper_onnx_sequence,
+    generate_sequence,
+)
 
 __all__ = (
     "BaseDataset",
@@ -21,10 +29,14 @@ __all__ = (
     "YOLOConcatDataset",
     "GroundingDataset",
     "MotionMapConfig",
+    "OnnxApproxMotionMapModule",
+    "OnnxMotionMapCoreModule",
     "OnnxMotionMapModule",
     "build_yolo_dataset",
     "build_grounding",
     "build_dataloader",
+    "generate_onnx_approx_sequence",
+    "generate_paper_onnx_sequence",
     "generate_sequence",
     "load_inference_source",
 )

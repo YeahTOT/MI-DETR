@@ -151,7 +151,7 @@ def export_motion_stream_onnx(
         torch_device = torch.device("cpu")
 
     model, detector_model = _prepare_detector_model(weights, torch_device, dynamic)
-    motion_module = create_motion_stream_module().to(torch_device).eval()
+    motion_module = create_motion_stream_module(mode="onnx_approx").to(torch_device).eval()
     wrapper = MotionIntegratedRTDETRWrapper(detector_model, motion_module).to(torch_device).eval()
 
     frame = torch.zeros((batch, 3, imgsz, imgsz), device=torch_device)

@@ -156,8 +156,28 @@ python motion_map.py \
 - `--source-root` 通常指向外观图像目录，即 `images/`。
 - `--output-root` 通常指向运动图输出目录，即 `image/`。
 - `--recursive` 会递归处理子目录，适合同时生成 `train/` 和 `test/` 下的运动图。
-- `--mode reference` 使用参考实现，`--mode onnx` 使用与流式导出路径一致的状态更新方式；默认是 `reference`。
+- `--mode reference` 使用论文参考实现。
+- `--mode paper_onnx` 使用 ONNX-friendly 的递推 RCA core，并在宿主侧执行论文中的 bilateral enhance；保存出的运动图与 `reference` 对齐。
+- `--mode onnx_approx` 使用纯图内近似版，便于整图导出和集成部署，但不保证与论文运动图像素级一致，视觉上通常会更亮一些。
 - 默认会以 3 通道 PNG 保存运动图；如果需要单通道输出，可加 `--no-save-rgb`。
+
+如果你需要在“贴近论文”和“纯 ONNX 近似”之间显式选择，推荐分别使用下面两种命令：
+
+```bash
+python motion_map.py \
+  --source-root /path/to/DAUB-R_retina/images \
+  --output-root /path/to/DAUB-R_retina/image \
+  --recursive \
+  --mode paper_onnx
+```
+
+```bash
+python motion_map.py \
+  --source-root /path/to/DAUB-R_retina/images \
+  --output-root /path/to/DAUB-R_retina/image_approx \
+  --recursive \
+  --mode onnx_approx
+```
 
 ## 训练
 
@@ -266,6 +286,21 @@ python export.py \
 - 输出：`output0`、`next_adapt_state`、`next_memory_state`
 - `frame` 是预处理后的 `1x3xHxW` 浮点张量，不是任意原始分辨率图像
 - 该模型仍然是有状态的，因此部署代码需要持续回传 `next_*` 状态
+- 集成流式模型内部使用的是 `onnx_approx` 运动分支，适合单图部署，但其运动图外观不追求与论文 reference 像素级一致
+
+如果你想单独导出运动分支的递推 core，请使用 `export_mition_onnx.py`：
+
+```bash
+python export_mition_onnx.py \
+  --output checkpoints/motion_map.onnx \
+  --imgsz 512
+```
+
+该导出产物暴露的是 RCA core，而不是最终增强后的运动图：
+
+- 输入：`frame`、`adapt_state`、`memory_state`、`state_valid`
+- 输出：`motion_core`、`next_adapt_state`、`next_memory_state`
+- 如果希望得到与论文一致的最终运动图，需要在 ONNX 输出的 `motion_core` 之后，在宿主侧再执行一次论文中的 `paper_postprocess`（幂次增强 + bilateral + 按帧归一化）
 
 ## ONNX 帧序列预测
 
@@ -275,6 +310,7 @@ python export.py \
 python video_onnx.py \
   --weights checkpoints/DAUB-R.onnx \
   --source /home/tot/project/VT5025-2512/obj_det/MI-DETR/datasets/infers/1 \
+  --motion-mode paper_onnx \
   --imgsz 512 \
   --conf 0.25 \
   --name daub-r_onnx
@@ -284,6 +320,9 @@ python video_onnx.py \
 
 - `video_onnx.py` 仅接受帧目录，不支持 MP4 文件。
 - `video.py` 仍然是 PyTorch 权重和 MP4 工作流的入口。
+- `--motion-mode` 支持 `reference`、`paper_onnx`、`onnx_approx`，默认是 `reference`。
+- 如果你在 ONNX 检测前希望生成最接近论文的运动图，优先使用 `paper_onnx`。
+- 如果你只是为了复用纯图内近似分支或与集成流式导出保持一致，可使用 `onnx_approx`。
 - ONNX 推理依赖 `onnx` 和 `onnxruntime`。
 
 ## ONNX 流式预测
@@ -310,7 +349,8 @@ python video_onnx_stream.py  --weights checkpoints/DAUB-R-stream.onnx   --source
 
 - `video_onnx_stream.py` 仅支持帧目录。
 - `video_onnx.py` 会先为整个序列生成运动图，再进行批量预测。
-- `video_onnx_stream.py` 会逐帧生成运动图，并在进入新的子目录时重置运动状态。
+- 当输入是 `DAUB-R.onnx` 时，`video_onnx_stream.py` 会逐帧运行 paper-aligned host pipeline，并在进入新的子目录时重置运动状态。
+- 当输入是 `DAUB-R-stream.onnx` 时，运动生成发生在图内部，走的是 `onnx_approx` 分支，因此更适合部署一致性，而不是论文外观一致性。
 - 脚本结束时会打印端到端 FPS 汇总，覆盖逐帧运动生成、推理和结果保存。
 - 输出结果会以带标注图像保存在 `images/` 下，以逐帧 JSON 保存在 `json/` 下。
 

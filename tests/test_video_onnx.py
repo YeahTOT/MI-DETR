@@ -32,6 +32,13 @@ class VideoOnnxCliTests(unittest.TestCase):
         self.assertFalse(args.exist_ok)
         self.assertTrue(args.save_rgb)
 
+    def test_parse_args_accepts_explicit_onnx_approx_mode(self):
+        import video_onnx
+
+        args = video_onnx.parse_args(["--source", "frames", "--motion-mode", "onnx_approx"])
+
+        self.assertEqual(args.motion_mode, "onnx_approx")
+
     def test_main_rejects_non_directory_source(self):
         import video_onnx
 
@@ -62,7 +69,7 @@ class VideoPipelineTests(unittest.TestCase):
             self.assertTrue((images_root / "seq_a" / "000002.png").is_file())
             self.assertTrue((images_root / "seq_b" / "000001.png").is_file())
 
-    def test_generate_motion_maps_onnx_writes_one_file_per_frame(self):
+    def test_generate_motion_maps_paper_onnx_writes_one_file_per_frame(self):
         import video_pipeline
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -76,7 +83,7 @@ class VideoPipelineTests(unittest.TestCase):
             written = video_pipeline.generate_motion_maps(
                 images_root=images_root,
                 motion_root=motion_root,
-                mode="onnx",
+                mode="paper_onnx",
                 recursive=True,
                 save_rgb=True,
             )

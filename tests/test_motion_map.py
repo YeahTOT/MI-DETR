@@ -34,7 +34,10 @@ class MotionMapApiTests(unittest.TestCase):
         module = self.load_motion_map_module()
         self.assertIsNotNone(module, "Expected ultralytics/data/motion_map.py to exist")
         self.assertTrue(hasattr(module, "generate_sequence"))
-        self.assertTrue(hasattr(module, "OnnxMotionMapModule"))
+        self.assertTrue(hasattr(module, "OnnxMotionMapCoreModule"))
+        self.assertTrue(hasattr(module, "OnnxApproxMotionMapModule"))
+        self.assertTrue(hasattr(module, "paper_postprocess"))
+        self.assertTrue(hasattr(module, "onnx_approx_postprocess"))
 
 
 class MotionMapBehaviorTests(unittest.TestCase):
@@ -78,14 +81,36 @@ class MotionMapBehaviorTests(unittest.TestCase):
         self.assertAlmostEqual(config.g_b, 2.0)
         self.assertAlmostEqual(config.alpha, 0.8)
         self.assertAlmostEqual(config.beta, 1.2)
+        self.assertAlmostEqual(config.theta_m, 0.3)
+        self.assertAlmostEqual(config.g_m, 2.5)
+        self.assertAlmostEqual(config.gamma_a, 0.5)
+        self.assertAlmostEqual(config.gamma_tau, 0.7)
+        self.assertAlmostEqual(config.eta_m, 0.7)
+        self.assertAlmostEqual(config.mexican_hat_sigma_surround, 2.0)
+        self.assertAlmostEqual(config.mexican_hat_surround_weight, 0.5)
         self.assertAlmostEqual(config.bilateral_sigma_color, 0.1)
         self.assertAlmostEqual(config.bilateral_sigma_space, 0.1)
 
-    def test_mexican_hat_kernel_sums_near_zero(self):
+    def test_mexican_hat_kernel_matches_paper_normalization(self):
         module = self.load_motion_map_module()
-        kernel = module.mexican_hat_kernel2d(1.0)
-        self.assertEqual(kernel.shape, (7, 7))
+        kernel = module.mexican_hat_kernel2d(1.0, sigma_surround=2.0, size=5, surround_weight=0.5)
+        self.assertEqual(kernel.shape, (5, 5))
         self.assertAlmostEqual(float(kernel.sum().item()), 0.0, places=4)
+        self.assertAlmostEqual(float(kernel.abs().sum().item()), 1.0, places=4)
+        self.assertGreater(float(kernel[2, 2].item()), 0.0)
+        self.assertLess(float(kernel[0, 0].item()), 0.0)
+
+    def test_paper_postprocess_keeps_sparse_response_darker_than_onnx_approx(self):
+        module = self.load_motion_map_module()
+        config = module.MotionMapConfig()
+        smoothing = module.gaussian_kernel2d(config.smoothing_sigma, size=config.smoothing_kernel_size)
+        motion = torch.zeros((1, 1, 17, 17), dtype=torch.float32)
+        motion[..., 8, 8] = 1.0
+
+        paper = module.paper_postprocess(motion, config)
+        approx = module.onnx_approx_postprocess(motion, smoothing, config)
+
+        self.assertLess(float(paper.mean().item()), float(approx.mean().item()))
 
     def test_sequence_layout_warnings_flag_flat_split_directories(self):
         module = self.load_motion_map_module()
@@ -129,7 +154,7 @@ class MotionMapBehaviorTests(unittest.TestCase):
 
     def test_onnx_module_ignores_previous_state_when_invalid(self):
         module = self.load_motion_map_module()
-        model = module.OnnxMotionMapModule()
+        model = module.OnnxMotionMapCoreModule()
         frame = self.make_edge_frame().unsqueeze(0)
         random_adapt = torch.rand_like(frame)
         random_memory = torch.rand_like(frame)
@@ -144,7 +169,7 @@ class MotionMapBehaviorTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec("onnx") is not None, "onnx is not installed")
     def test_onnx_module_exports(self):
         module = self.load_motion_map_module()
-        model = module.OnnxMotionMapModule().eval()
+        model = module.OnnxMotionMapCoreModule().eval()
         frame = self.make_edge_frame().unsqueeze(0)
         adapt = torch.zeros_like(frame)
         memory = torch.zeros_like(frame)
@@ -186,7 +211,7 @@ class MotionMapBehaviorTests(unittest.TestCase):
                     "--output-root",
                     str(output_root),
                     "--mode",
-                    "onnx",
+                    "paper_onnx",
                     "--recursive",
                 ],
                 cwd=Path.cwd(),

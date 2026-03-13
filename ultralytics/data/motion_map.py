@@ -17,7 +17,7 @@ IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
 @dataclass(frozen=True)
 class MotionMapConfig:
-    """Default RCA parameters from the MI-DETR paper."""
+    """Default RCA parameters aligned with the MI-DETR paper."""
 
     # 感光/适应阶段参数：控制输入亮度经过非线性拉伸时的阈值和增益。
     theta_p: float = 0.1
@@ -29,23 +29,24 @@ class MotionMapConfig:
     gaussian_sigma: float = 1.0
     sigma_h: float = 0.3
     # 运动响应阶段参数：空间增强后的阈值和最终增益。
-    theta_m: float = 0.4
-    g_m: float = 5.0
+    theta_m: float = 0.3
+    g_m: float = 2.5
     # 时间记忆阶段参数：
     # alpha 越大，越依赖上一时刻记忆；beta 控制帧间差响应幅度。
     alpha: float = 0.8
     beta: float = 1.2
     # 融合阶段参数：
     # gamma_a / gamma_tau 控制 contrast 与 memory 的耦合，eta_m 决定 motion 和 memory 的融合占比。
-    gamma_a: float = 0.7
-    gamma_tau: float = 1.0
-    eta_m: float = 0.2
+    gamma_a: float = 0.5
+    gamma_tau: float = 0.7
+    eta_m: float = 0.7
     # 后处理参数：gamma_p 控制非线性增强，其余参数决定 reference / onnx 各自使用的平滑方式。
     gamma_p: float = 0.8
     gaussian_kernel_size: int = 3
     mexican_hat_size: int = 5
     mexican_hat_sigma_center: float = 1.0
-    mexican_hat_sigma_surround: float = 1.5
+    mexican_hat_sigma_surround: float = 2.0
+    mexican_hat_surround_weight: float = 0.5
     smoothing_kernel_size: int = 5
     smoothing_sigma: float = 1.0
     bilateral_diameter: int = 5
@@ -89,23 +90,30 @@ def gaussian_kernel2d(
 
 def mexican_hat_kernel2d(
     sigma_center: float,
-    sigma_surround: float = 1.5,
+    sigma_surround: float = 2.0,
     *,
+    surround_weight: float = 0.5,
     size: int | None = None,
     dtype: torch.dtype = torch.float32,
     device: torch.device | str | None = None,
 ) -> torch.Tensor:
-    """Create a zero-sum Mexican-hat kernel as a difference of Gaussians."""
-    if sigma_center <= 0 or sigma_surround <= 0:
-        raise ValueError("sigma_center and sigma_surround must be positive")
-    # Mexican-hat 核本质上是两个不同尺度高斯的差，用于模拟中心-周围结构。
+    """Create the paper-style Mexican-hat kernel with zero-sum and unit-L1 normalization."""
+    if sigma_center <= 0 or sigma_surround <= 0 or surround_weight <= 0:
+        raise ValueError("sigma_center, sigma_surround and surround_weight must be positive")
+    # 论文中的核在有限窗口上定义，因此这里显式使用离散采样，
+    # 再强制零和并做 L1 归一化，避免截断带来的偏置。
     size = kernel_size_from_sigma(sigma_center) if size is None else int(size)
     if size <= 0 or size % 2 == 0:
         raise ValueError("size must be a positive odd integer")
 
-    center = gaussian_kernel2d(sigma_center, size=size, dtype=dtype, device=device)
-    surround = gaussian_kernel2d(sigma_surround, size=size, dtype=dtype, device=device)
-    return center - surround
+    coords = torch.arange(size, dtype=dtype, device=device) - size // 2
+    yy, xx = torch.meshgrid(coords, coords, indexing="ij")
+    radius2 = xx.square() + yy.square()
+    center = torch.exp(-radius2 / (2 * sigma_center * sigma_center)) / (2 * math.pi * sigma_center * sigma_center)
+    surround = torch.exp(-radius2 / (2 * sigma_surround * sigma_surround)) / (2 * math.pi * sigma_surround * sigma_surround)
+    kernel = center - surround_weight * surround
+    kernel = kernel - kernel.mean()
+    return kernel / kernel.abs().sum().clamp_min(torch.finfo(kernel.dtype).eps)
 
 
 def collect_image_groups(source_root: str | Path, recursive: bool = False) -> list[tuple[Path, list[Path]]]:
@@ -291,20 +299,43 @@ def _motion_response(
     return config.g_m * thresholded
 
 
-def _reference_enhance(motion: torch.Tensor, config: MotionMapConfig) -> torch.Tensor:
-    # reference 路径允许依赖 OpenCV，因此这里用双边滤波做边缘保持平滑，
-    # 更接近论文参考实现，但这类算子通常不适合直接导出成 ONNX。
-    powered = motion.detach().cpu().squeeze().clamp_min(0.0).pow(config.gamma_p).numpy().astype(np.float32, copy=False)
-    smoothed = cv2.bilateralFilter(
-        powered,
-        d=config.bilateral_diameter,
-        sigmaColor=config.bilateral_sigma_color,
-        sigmaSpace=config.bilateral_sigma_space,
-    )
-    return torch.from_numpy(smoothed).unsqueeze(0).unsqueeze(0)
+def paper_postprocess(motion: torch.Tensor, config: MotionMapConfig | None = None) -> torch.Tensor:
+    """Apply the paper-style host-side enhancement without changing per-frame dynamic range."""
+    if motion.ndim != 4 or motion.shape[1] != 1:
+        raise ValueError("motion must have shape [N, 1, H, W]")
+
+    config = config or MotionMapConfig()
+    original_device = motion.device
+    outputs = []
+    for sample in motion.detach().to(dtype=torch.float32, device="cpu"):
+        powered = sample.squeeze(0).clamp_min(0.0).pow(config.gamma_p).numpy().astype(np.float32, copy=False)
+        smoothed = cv2.bilateralFilter(
+            powered,
+            d=config.bilateral_diameter,
+            sigmaColor=config.bilateral_sigma_color,
+            sigmaSpace=config.bilateral_sigma_space,
+        )
+        outputs.append(torch.from_numpy(smoothed).unsqueeze(0))
+    return torch.stack(outputs, dim=0).to(dtype=motion.dtype, device=original_device)
 
 
-def _onnx_enhance(motion: torch.Tensor, smoothing_kernel: torch.Tensor, config: MotionMapConfig) -> torch.Tensor:
+def onnx_approx_postprocess(
+    motion: torch.Tensor,
+    smoothing_kernel: torch.Tensor | None = None,
+    config: MotionMapConfig | None = None,
+) -> torch.Tensor:
+    """Apply the graph-only approximate enhancement used for export-friendly motion maps."""
+    if motion.ndim != 4 or motion.shape[1] != 1:
+        raise ValueError("motion must have shape [N, 1, H, W]")
+
+    config = config or MotionMapConfig()
+    if smoothing_kernel is None:
+        smoothing_kernel = gaussian_kernel2d(
+            config.smoothing_sigma,
+            size=config.smoothing_kernel_size,
+            dtype=motion.dtype,
+            device=motion.device,
+        )
     # onnx 路径用“幂次增强 + 高斯平滑 + 最大值归一化”替代双边滤波，
     # 避免引入不易导出的 OpenCV 后处理算子。
     powered = motion.clamp_min(0.0).pow(config.gamma_p)
@@ -349,7 +380,7 @@ def generate_sequence(
     use_sobel_first: bool = True,
     config: MotionMapConfig | None = None,
 ) -> torch.Tensor:
-    """Generate a reference motion-map sequence from grayscale frames."""
+    """Generate the paper/reference motion-map sequence from grayscale frames."""
     # 这里接收完整序列，统一在 CPU 上执行 reference 版本，避免双边滤波和小张量循环带来的设备切换复杂度。
     if frames.ndim != 4 or frames.shape[1] != 1:
         raise ValueError("frames must have shape [T, 1, H, W]")
@@ -383,14 +414,68 @@ def generate_sequence(
             config,
             use_sobel_first=use_sobel_first,
         )
-        # reference 路径逐帧做双边滤波增强，再收集成完整序列。
-        outputs.append(_reference_enhance(fused, config).squeeze(0))
+        # reference 路径逐帧做论文里的 host-side enhance，再收集成完整序列。
+        outputs.append(paper_postprocess(fused, config).squeeze(0))
 
     return torch.stack(outputs, dim=0).to(original_device)
 
 
-class OnnxMotionMapModule(nn.Module):
-    """ONNX-friendly single-step RCA motion-map module."""
+def generate_paper_onnx_sequence(
+    frames: torch.Tensor,
+    *,
+    config: MotionMapConfig | None = None,
+) -> torch.Tensor:
+    """Generate motion maps with ONNX-friendly recurrent core and paper host-side postprocess."""
+    if frames.ndim != 4 or frames.shape[1] != 1:
+        raise ValueError("frames must have shape [T, 1, H, W]")
+
+    config = config or MotionMapConfig()
+    original_device = frames.device
+    frames_cpu = frames.detach().to(dtype=torch.float32, device="cpu")
+    module = OnnxMotionMapCoreModule(config).eval()
+    adapt_state = torch.zeros_like(frames_cpu[:1])
+    memory_state = torch.zeros_like(frames_cpu[:1])
+    state_valid = torch.zeros((1, 1, 1, 1), dtype=frames_cpu.dtype)
+    outputs = []
+
+    with torch.no_grad():
+        for frame in frames_cpu:
+            fused, adapt_state, memory_state = module(frame.unsqueeze(0), adapt_state, memory_state, state_valid)
+            outputs.append(paper_postprocess(fused, config).squeeze(0))
+            state_valid.fill_(1.0)
+
+    return torch.stack(outputs, dim=0).to(original_device)
+
+
+def generate_onnx_approx_sequence(
+    frames: torch.Tensor,
+    *,
+    config: MotionMapConfig | None = None,
+) -> torch.Tensor:
+    """Generate graph-only approximate motion maps frame-by-frame."""
+    if frames.ndim != 4 or frames.shape[1] != 1:
+        raise ValueError("frames must have shape [T, 1, H, W]")
+
+    config = config or MotionMapConfig()
+    original_device = frames.device
+    frames_cpu = frames.detach().to(dtype=torch.float32, device="cpu")
+    module = OnnxApproxMotionMapModule(config).eval()
+    adapt_state = torch.zeros_like(frames_cpu[:1])
+    memory_state = torch.zeros_like(frames_cpu[:1])
+    state_valid = torch.zeros((1, 1, 1, 1), dtype=frames_cpu.dtype)
+    outputs = []
+
+    with torch.no_grad():
+        for frame in frames_cpu:
+            motion, adapt_state, memory_state = module(frame.unsqueeze(0), adapt_state, memory_state, state_valid)
+            outputs.append(motion.squeeze(0))
+            state_valid.fill_(1.0)
+
+    return torch.stack(outputs, dim=0).to(original_device)
+
+
+class OnnxMotionMapCoreModule(nn.Module):
+    """ONNX-friendly single-step RCA core without paper host-side postprocess."""
 
     def __init__(self, config: MotionMapConfig | None = None):
         super().__init__()
@@ -406,12 +491,9 @@ class OnnxMotionMapModule(nn.Module):
             mexican_hat_kernel2d(
                 self.config.mexican_hat_sigma_center,
                 self.config.mexican_hat_sigma_surround,
+                surround_weight=self.config.mexican_hat_surround_weight,
                 size=self.config.mexican_hat_size,
             ),
-        )
-        self.register_buffer(
-            "smoothing_kernel",
-            gaussian_kernel2d(self.config.smoothing_sigma, size=self.config.smoothing_kernel_size),
         )
 
     def forward(
@@ -442,21 +524,52 @@ class OnnxMotionMapModule(nn.Module):
             self.config,
             use_sobel_first=True,
         )
-        # ONNX 路径的输出后处理必须保持纯张量算子，便于稳定导出。
-        motion = _onnx_enhance(fused, self.smoothing_kernel, self.config)
+        return fused, next_contrast, next_memory
+
+
+class OnnxApproxMotionMapModule(nn.Module):
+    """Graph-only approximation of the paper motion map suitable for full ONNX export."""
+
+    def __init__(self, config: MotionMapConfig | None = None):
+        super().__init__()
+        self.config = config or MotionMapConfig()
+        self.core = OnnxMotionMapCoreModule(self.config)
+        self.register_buffer(
+            "smoothing_kernel",
+            gaussian_kernel2d(self.config.smoothing_sigma, size=self.config.smoothing_kernel_size),
+        )
+
+    def forward(
+        self,
+        frame: torch.Tensor,
+        adapt_state: torch.Tensor,
+        memory_state: torch.Tensor,
+        state_valid: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        fused, next_contrast, next_memory = self.core(frame, adapt_state, memory_state, state_valid)
+        motion = onnx_approx_postprocess(fused, self.smoothing_kernel, self.config)
         return motion, next_contrast, next_memory
+
+
+OnnxMotionMapModule = OnnxApproxMotionMapModule
 
 
 __all__ = (
     "IMAGE_SUFFIXES",
     "MotionMapConfig",
+    "OnnxApproxMotionMapModule",
+    "OnnxMotionMapCoreModule",
     "OnnxMotionMapModule",
     "collect_image_groups",
     "gaussian_kernel2d",
+    "generate_onnx_approx_sequence",
+    "generate_paper_onnx_sequence",
     "generate_sequence",
     "kernel_size_from_sigma",
     "load_grayscale_frames",
     "mexican_hat_kernel2d",
+    "onnx_approx_postprocess",
+    "paper_postprocess",
     "save_motion_image",
     "sequence_layout_warnings",
 )

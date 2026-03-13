@@ -1,4 +1,4 @@
-"""Export the standalone OnnxMotionMapModule to ONNX."""
+"""Export the standalone OnnxMotionMapCoreModule to ONNX."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ MOTION_MAP = _load_motion_map_module()
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export OnnxMotionMapModule to ONNX.")
+    parser = argparse.ArgumentParser(description="Export OnnxMotionMapCoreModule to ONNX.")
     parser.add_argument("--output", default="motion_map.onnx", help="Output ONNX path.")
     parser.add_argument("--imgsz", type=int, default=512, help="Static square input size.")
     parser.add_argument("--opset", type=int, default=13, help="ONNX opset version.")
@@ -37,7 +37,7 @@ def main(argv=None) -> Path:
     args = parse_args(argv)
     output = Path(args.output).expanduser().resolve()
 
-    model = MOTION_MAP.OnnxMotionMapModule().eval()
+    model = MOTION_MAP.OnnxMotionMapCoreModule().eval()
     frame = torch.zeros((1, 1, args.imgsz, args.imgsz), dtype=torch.float32)
     adapt_state = torch.zeros((1, 1, args.imgsz, args.imgsz), dtype=torch.float32)
     memory_state = torch.zeros((1, 1, args.imgsz, args.imgsz), dtype=torch.float32)
@@ -49,7 +49,7 @@ def main(argv=None) -> Path:
         (frame, adapt_state, memory_state, state_valid),
         str(output),
         input_names=["frame", "adapt_state", "memory_state", "state_valid"],
-        output_names=["motion", "next_adapt_state", "next_memory_state"],
+        output_names=["motion_core", "next_adapt_state", "next_memory_state"],
         opset_version=args.opset,
         do_constant_folding=True,
     )

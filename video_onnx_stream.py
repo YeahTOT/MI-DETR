@@ -91,7 +91,7 @@ def main(argv=None) -> Path:
     session, input_name, output_names = build_onnx_session(weights, args.device)
     names = load_onnx_class_names(weights)
     integrated_motion_stream = isinstance(input_name, dict)
-    motion_module = None if integrated_motion_stream else create_motion_stream_module()
+    motion_module = None if integrated_motion_stream else create_motion_stream_module(mode="paper_onnx")
 
     frame_index = 0
     # 这里统计的是逐帧端到端处理速度，包含 motion、推理、后处理和落盘。
@@ -127,7 +127,12 @@ def main(argv=None) -> Path:
                     _, _, frame_tensor = load_stream_frame(frame_path)
                     state = reset_motion_stream_state(frame_tensor)
 
-                appearance_image, _, motion_image, state = generate_stream_motion_frame(frame_path, motion_module, state)
+                appearance_image, _, motion_image, state = generate_stream_motion_frame(
+                    frame_path,
+                    motion_module,
+                    state,
+                    mode="paper_onnx",
+                )
                 frame_input = preprocess_stream_frame(appearance_image, motion_image, args.imgsz)
                 preds = session.run(output_names, {input_name: frame_input})
 

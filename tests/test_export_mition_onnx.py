@@ -42,5 +42,5 @@ class ExportMitionOnnxCliTests(unittest.TestCase):
         self.assertEqual(tuple(state_valid.shape), (1, 1, 1, 1))
         self.assertEqual(frame.dtype, torch.float32)
         self.assertEqual(kwargs["input_names"], ["frame", "adapt_state", "memory_state", "state_valid"])
-        self.assertEqual(kwargs["output_names"], ["motion", "next_adapt_state", "next_memory_state"])
+        self.assertEqual(kwargs["output_names"], ["motion_core", "next_adapt_state", "next_memory_state"])
         self.assertEqual(kwargs["opset_version"], 13)

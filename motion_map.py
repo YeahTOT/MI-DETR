@@ -7,7 +7,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import torch
 from tqdm import tqdm
 
 
@@ -33,8 +32,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-root", required=True, help="Appearance-image root, usually an images/ directory.")
     # output-root 指向 motion map 输出目录，输出路径会尽量保持与 source-root 相同的相对结构。
     parser.add_argument("--output-root", required=True, help="Output root, usually an image/ directory.")
-    # reference 使用参考实现整段处理，onnx 使用逐帧递推实现，便于与导出的 ONNX 行为对齐。
-    parser.add_argument("--mode", choices=("reference", "onnx"), default="reference", help="Generation backend.")
+    # reference 是论文参考实现；
+    # paper_onnx 使用 ONNX-friendly 递推 core，再在宿主侧执行论文里的 bilateral enhance；
+    # onnx_approx 则保留纯图内近似版，便于整图导出。
+    parser.add_argument(
+        "--mode",
+        choices=("reference", "paper_onnx", "onnx_approx"),
+        default="reference",
+        help="Generation backend.",
+    )
     # recursive 打开后，会递归遍历 source-root 下的所有子目录。
     parser.add_argument("--recursive", action="store_true", help="Traverse source-root recursively.")
     # 默认保存为 3 通道 PNG，方便与常见视觉工具和数据管线兼容。
@@ -72,40 +78,45 @@ def run_reference(groups: list[tuple[Path, list[Path]]], source_root: Path, outp
     return written
 
 
-def run_onnx(groups: list[tuple[Path, list[Path]]], source_root: Path, output_root: Path, save_rgb: bool) -> int:
-    # onnx 路径改成“逐帧递推”：
-    # 每次只输入当前帧和上一时刻状态，输出当前 motion map 与下一时刻状态。
+def _write_generated_sequence(
+    groups: list[tuple[Path, list[Path]]],
+    source_root: Path,
+    output_root: Path,
+    save_rgb: bool,
+    generator,
+) -> int:
     written = 0
-    module = MOTION_MAP.OnnxMotionMapModule().eval()
-    with torch.no_grad():
-        total = sum(len(image_paths) for _, image_paths in groups)
-        with tqdm(total=total, desc="Generating motion maps", unit="image") as progress:
-            for _, image_paths in groups:
-                frames = MOTION_MAP.load_grayscale_frames(image_paths)
-                # adapt_state 这个历史命名沿用了导出接口的设计，
-                # 实际内容是上一帧 contrast，而不是适应层输出。
-                adapt_state = torch.zeros_like(frames[:1])
-                # memory_state 保存上一时刻的时间记忆图。
-                memory_state = torch.zeros_like(frames[:1])
-                # state_valid=0 表示当前还没有历史状态，第一帧需要走首帧初始化逻辑。
-                state_valid = torch.zeros((1, 1, 1, 1), dtype=frames.dtype)
-
-                for image_path, frame in zip(image_paths, frames):
-                    # 单帧输入从 [1, H, W] 补成 [1, 1, H, W]，与模块 forward 对齐。
-                    motion_map, adapt_state, memory_state = module(
-                        frame.unsqueeze(0),
-                        adapt_state,
-                        memory_state,
-                        state_valid,
-                    )
-                    target = output_root / image_path.relative_to(source_root)
-                    # forward 返回的是带 batch 维的结果，这里 squeeze 回单张图再保存。
-                    MOTION_MAP.save_motion_image(target, motion_map.squeeze(0), save_rgb=save_rgb)
-                    # 第一帧处理结束后，后续帧都可以使用有效历史状态。
-                    state_valid.fill_(1.0)
-                    written += 1
-                    progress.update(1)
+    total = sum(len(image_paths) for _, image_paths in groups)
+    with tqdm(total=total, desc="Generating motion maps", unit="image") as progress:
+        for _, image_paths in groups:
+            frames = MOTION_MAP.load_grayscale_frames(image_paths)
+            motion_maps = generator(frames)
+            for image_path, motion_map in zip(image_paths, motion_maps):
+                target = output_root / image_path.relative_to(source_root)
+                MOTION_MAP.save_motion_image(target, motion_map, save_rgb=save_rgb)
+                written += 1
+                progress.update(1)
     return written
+
+
+def run_paper_onnx(groups: list[tuple[Path, list[Path]]], source_root: Path, output_root: Path, save_rgb: bool) -> int:
+    return _write_generated_sequence(
+        groups,
+        source_root,
+        output_root,
+        save_rgb,
+        MOTION_MAP.generate_paper_onnx_sequence,
+    )
+
+
+def run_onnx_approx(groups: list[tuple[Path, list[Path]]], source_root: Path, output_root: Path, save_rgb: bool) -> int:
+    return _write_generated_sequence(
+        groups,
+        source_root,
+        output_root,
+        save_rgb,
+        MOTION_MAP.generate_onnx_approx_sequence,
+    )
 
 
 def main() -> None:
@@ -114,7 +125,7 @@ def main() -> None:
     # 2. 规范化输入输出路径
     # 3. 收集并按目录分组图片
     # 4. 检查目录布局是否会导致状态错误复用
-    # 5. 根据 mode 选择 reference / onnx 后端
+    # 5. 根据 mode 选择 reference / paper_onnx / onnx_approx 后端
     # 6. 输出汇总信息
     args = parse_args()
     source_root = Path(args.source_root).expanduser().resolve()
@@ -125,8 +136,10 @@ def main() -> None:
 
     if args.mode == "reference":
         written = run_reference(groups, source_root, output_root, args.save_rgb)
+    elif args.mode == "paper_onnx":
+        written = run_paper_onnx(groups, source_root, output_root, args.save_rgb)
     else:
-        written = run_onnx(groups, source_root, output_root, args.save_rgb)
+        written = run_onnx_approx(groups, source_root, output_root, args.save_rgb)
 
     print(f"Saved {written} motion maps to {output_root}")
 

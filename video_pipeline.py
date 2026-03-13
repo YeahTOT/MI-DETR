@@ -94,8 +94,12 @@ def stream_layout_warnings(groups: list[tuple[Path, list[Path]]]) -> list[str]:
     return MOTION_MAP.sequence_layout_warnings(groups)
 
 
-def create_motion_stream_module():
-    return MOTION_MAP.OnnxMotionMapModule().eval()
+def create_motion_stream_module(mode: str = "paper_onnx"):
+    if mode == "paper_onnx":
+        return MOTION_MAP.OnnxMotionMapCoreModule().eval()
+    if mode == "onnx_approx":
+        return MOTION_MAP.OnnxApproxMotionMapModule().eval()
+    raise ValueError(f"Unsupported motion stream mode: {mode}")
 
 
 def load_stream_frame(path: Path) -> tuple[np.ndarray, np.ndarray, torch.Tensor]:
@@ -130,6 +134,7 @@ def generate_stream_motion_frame(
     frame_path: Path,
     module,
     state: MotionStreamState,
+    mode: str = "paper_onnx",
 ) -> tuple[np.ndarray, torch.Tensor, np.ndarray, MotionStreamState]:
     appearance_bgr, _, frame = load_stream_frame(frame_path)
     if state.adapt_state.shape != frame.shape:
@@ -143,6 +148,10 @@ def generate_stream_motion_frame(
             state.memory_state,
             state.state_valid,
         )
+    if mode == "paper_onnx":
+        motion = MOTION_MAP.paper_postprocess(motion)
+    elif mode != "onnx_approx":
+        raise ValueError(f"Unsupported motion stream mode: {mode}")
     next_state = MotionStreamState(
         adapt_state=adapt_state,
         memory_state=memory_state,
@@ -262,25 +271,26 @@ def generate_motion_maps(
                     MOTION_MAP.save_motion_image(target, motion_map, save_rgb=save_rgb)
                     written += 1
                     progress.update(1)
+    elif mode == "paper_onnx":
+        with tqdm(total=total, desc="Generating motion maps", unit="image") as progress:
+            for _, image_paths in groups:
+                frames = MOTION_MAP.load_grayscale_frames(image_paths)
+                motion_maps = MOTION_MAP.generate_paper_onnx_sequence(frames)
+                for image_path, motion_map in zip(image_paths, motion_maps):
+                    target = motion_root / image_path.relative_to(images_root)
+                    MOTION_MAP.save_motion_image(target, motion_map, save_rgb=save_rgb)
+                    written += 1
+                    progress.update(1)
+    elif mode == "onnx_approx":
+        with tqdm(total=total, desc="Generating motion maps", unit="image") as progress:
+            for _, image_paths in groups:
+                frames = MOTION_MAP.load_grayscale_frames(image_paths)
+                motion_maps = MOTION_MAP.generate_onnx_approx_sequence(frames)
+                for image_path, motion_map in zip(image_paths, motion_maps):
+                    target = motion_root / image_path.relative_to(images_root)
+                    MOTION_MAP.save_motion_image(target, motion_map, save_rgb=save_rgb)
+                    written += 1
+                    progress.update(1)
     else:
-        module = MOTION_MAP.OnnxMotionMapModule().eval()
-        with torch.no_grad():
-            with tqdm(total=total, desc="Generating motion maps", unit="image") as progress:
-                for _, image_paths in groups:
-                    frames = MOTION_MAP.load_grayscale_frames(image_paths)
-                    adapt_state = torch.zeros_like(frames[:1])
-                    memory_state = torch.zeros_like(frames[:1])
-                    state_valid = torch.zeros((1, 1, 1, 1), dtype=frames.dtype)
-                    for image_path, frame in zip(image_paths, frames):
-                        motion_map, adapt_state, memory_state = module(
-                            frame.unsqueeze(0),
-                            adapt_state,
-                            memory_state,
-                            state_valid,
-                        )
-                        target = motion_root / image_path.relative_to(images_root)
-                        MOTION_MAP.save_motion_image(target, motion_map.squeeze(0), save_rgb=save_rgb)
-                        state_valid.fill_(1.0)
-                        written += 1
-                        progress.update(1)
+        raise ValueError(f"Unsupported motion-map mode: {mode}")
     return written

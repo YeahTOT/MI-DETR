@@ -159,6 +159,30 @@ def preprocess_stream_frame(appearance_bgr: np.ndarray, motion_bgr: np.ndarray, 
     return np.ascontiguousarray(transformed[None].astype(np.float32) / 255.0)
 
 
+def preprocess_stream_appearance_frame(appearance_bgr: np.ndarray, imgsz: int) -> np.ndarray:
+    letterbox = LetterBox((imgsz, imgsz), auto=False, scaleFill=True)
+    transformed = letterbox(image=appearance_bgr)
+    transformed = transformed[..., ::-1].transpose((2, 0, 1))
+    return np.ascontiguousarray(transformed[None].astype(np.float32) / 255.0)
+
+
+def frame_tensor_to_motion_grayscale(frame_rgb: torch.Tensor) -> torch.Tensor:
+    if frame_rgb.ndim != 4 or frame_rgb.shape[1] != 3:
+        raise ValueError(f"Expected frame tensor shape [N, 3, H, W], got {tuple(frame_rgb.shape)}")
+    red = frame_rgb[:, 0:1]
+    green = frame_rgb[:, 1:2]
+    blue = frame_rgb[:, 2:3]
+    return 0.299 * red + 0.587 * green + 0.114 * blue
+
+
+def motion_tensor_to_rgb_tensor(motion: torch.Tensor) -> torch.Tensor:
+    config = MOTION_MAP.MotionMapConfig()
+    max_value = motion.amax(dim=(-2, -1), keepdim=True)
+    normalized = motion / max_value.clamp_min(config.eps)
+    normalized = torch.where(max_value > config.eps, normalized, torch.zeros_like(motion))
+    return normalized.repeat(1, 3, 1, 1)
+
+
 def build_stream_results(appearance_image: np.ndarray, frame_path: Path, names: dict[int, str], boxes: torch.Tensor) -> Results:
     return Results(appearance_image, path=str(frame_path), names=names, boxes=boxes)
 

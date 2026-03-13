@@ -104,6 +104,17 @@ class VideoPipelineStreamTests(unittest.TestCase):
         self.assertGreaterEqual(float(tensor.min()), 0.0)
         self.assertLessEqual(float(tensor.max()), 1.0)
 
+    def test_preprocess_stream_appearance_frame_returns_expected_tensor(self):
+        import video_pipeline
+
+        appearance = np.full((16, 16, 3), 255, dtype=np.uint8)
+
+        tensor = video_pipeline.preprocess_stream_appearance_frame(appearance, imgsz=32)
+
+        self.assertEqual(tensor.shape, (1, 3, 32, 32))
+        self.assertGreaterEqual(float(tensor.min()), 0.0)
+        self.assertLessEqual(float(tensor.max()), 1.0)
+
     def test_postprocess_stream_predictions_maps_boxes_to_original_image(self):
         import video_pipeline
 
@@ -167,7 +178,9 @@ class VideoOnnxStreamIntegrationTests(unittest.TestCase):
 
             with patch("video_onnx_stream.build_onnx_session", return_value=(session, "images", ["output0"])) as mock_build, patch(
                 "video_onnx_stream.load_onnx_class_names", return_value={0: "uav"}
-            ), patch("video_onnx_stream.reset_motion_stream_state", wraps=video_onnx_stream.reset_motion_stream_state) as mock_reset:
+            ), patch("video_onnx_stream.reset_motion_stream_state", wraps=video_onnx_stream.reset_motion_stream_state) as mock_reset, patch(
+                "video_onnx_stream.time.perf_counter", side_effect=[10.0, 11.0]
+            ), patch("builtins.print") as mock_print:
                 save_dir = video_onnx_stream.main(
                     [
                         "--weights",
@@ -188,6 +201,75 @@ class VideoOnnxStreamIntegrationTests(unittest.TestCase):
             self.assertEqual(mock_reset.call_count, 2)
             self.assertTrue((save_dir / "images" / "seq_a" / "000001.png").is_file())
             self.assertTrue((save_dir / "json" / "seq_b" / "000001.json").is_file())
+            mock_print.assert_any_call("Processed 3 frames")
+            mock_print.assert_any_call("End-to-end FPS: 3.00")
+
+    def test_main_runs_integrated_motion_stream_model(self):
+        import video_onnx_stream
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_root = root / "frames"
+            weights = root / "DAUB-R-stream.onnx"
+            write_test_frame(source_root / "seq" / "000001.png", 0)
+            write_test_frame(source_root / "seq" / "000002.png", 1)
+            weights.write_bytes(b"onnx")
+
+            session = MagicMock()
+            session.run.side_effect = [
+                [
+                    np.array([[[0.5, 0.5, 0.2, 0.2, 0.9]]], dtype=np.float32),
+                    np.ones((1, 1, 512, 512), dtype=np.float32),
+                    np.ones((1, 1, 512, 512), dtype=np.float32),
+                ],
+                [
+                    np.array([[[0.5, 0.5, 0.2, 0.2, 0.9]]], dtype=np.float32),
+                    np.full((1, 1, 512, 512), 2.0, dtype=np.float32),
+                    np.full((1, 1, 512, 512), 3.0, dtype=np.float32),
+                ],
+            ]
+
+            input_binding = {
+                "frame": "frame",
+                "adapt_state": "adapt_state",
+                "memory_state": "memory_state",
+                "state_valid": "state_valid",
+            }
+
+            with patch("video_onnx_stream.build_onnx_session", return_value=(session, input_binding, ["output0", "next_adapt_state", "next_memory_state"])) as mock_build, patch(
+                "video_onnx_stream.load_onnx_class_names", return_value={0: "uav"}
+            ), patch("video_onnx_stream.create_motion_stream_module") as mock_motion_module, patch(
+                "video_onnx_stream.time.perf_counter", side_effect=[20.0, 20.5]
+            ), patch("builtins.print") as mock_print:
+                save_dir = video_onnx_stream.main(
+                    [
+                        "--weights",
+                        str(weights),
+                        "--source",
+                        str(source_root),
+                        "--recursive",
+                        "--project",
+                        str(root / "runs"),
+                        "--name",
+                        "stream_integrated",
+                        "--exist-ok",
+                    ]
+                )
+
+            mock_build.assert_called_once_with(weights.resolve(), "cpu")
+            mock_motion_module.assert_not_called()
+            self.assertEqual(session.run.call_count, 2)
+            first_feeds = session.run.call_args_list[0].args[1]
+            second_feeds = session.run.call_args_list[1].args[1]
+            self.assertEqual(first_feeds["frame"].shape, (1, 3, 512, 512))
+            self.assertEqual(first_feeds["adapt_state"].shape, (1, 1, 512, 512))
+            self.assertTrue(np.allclose(first_feeds["state_valid"], 0.0))
+            self.assertTrue(np.allclose(second_feeds["state_valid"], 1.0))
+            self.assertTrue(np.allclose(second_feeds["adapt_state"], 1.0))
+            self.assertTrue((save_dir / "images" / "seq" / "000002.png").is_file())
+            self.assertTrue((save_dir / "json" / "seq" / "000002.json").is_file())
+            mock_print.assert_any_call("Processed 2 frames")
+            mock_print.assert_any_call("End-to-end FPS: 4.00")
 
 
 if __name__ == "__main__":

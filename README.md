@@ -231,6 +231,24 @@ python export.py \
 
 This requires `onnx`. If graph simplification is enabled, install `onnxruntime` as well.
 
+To export the stream-integrated ONNX, enable `--with-motion-stream`. This model keeps the detector output in one file,
+but moves motion generation into the graph and exposes recurrent state I/O for deployment:
+
+```bash
+python export.py \
+  --weights checkpoints/DAUB-R.pt \
+  --with-motion-stream \
+  --output checkpoints/DAUB-R-stream.onnx \
+  --imgsz 512
+```
+
+Stream-integrated ONNX interface:
+
+- inputs: `frame`, `adapt_state`, `memory_state`, `state_valid`
+- outputs: `output0`, `next_adapt_state`, `next_memory_state`
+- `frame` is a preprocessed `1x3xHxW` float tensor, not an arbitrary raw-resolution image
+- the model is still stateful, so deployment code must keep feeding back `next_*` states
+
 ## ONNX Frame-Sequence Prediction
 
 Use `video_onnx.py` for ONNX inference on a frame directory. The script copies the appearance frames into a run
@@ -241,7 +259,7 @@ python video_onnx.py \
   --weights checkpoints/DAUB-R.onnx \
   --source /home/tot/project/VT5025-2512/obj_det/MI-DETR/datasets/infers/1 \
   --imgsz 512 \
-  --conf 0.1 \
+  --conf 0.25 \
   --name daub-r_onnx
 ```
 
@@ -254,7 +272,10 @@ Notes:
 ## ONNX Streaming Prediction
 
 Use `video_onnx_stream.py` when you want to simulate the real streaming path: each frame first updates the recurrent
-motion state, then immediately runs ONNX detection on the current frame.
+motion state, then immediately runs ONNX detection on the current frame. It supports both:
+
+- `DAUB-R.onnx`: detector-only ONNX, where Python generates motion first
+- `DAUB-R-stream.onnx`: stream-integrated ONNX, where the graph generates motion internally
 
 ```bash
 python video_onnx_stream.py \
@@ -264,12 +285,17 @@ python video_onnx_stream.py \
   --name daub-r_onnx_stream
 
 ```
+```bash
+python video_onnx_stream.py  --weights checkpoints/DAUB-R-stream.onnx   --source datasets/infers/1   --conf 0.25   --name daub-r_onnx_stream_integrated
+```
+
 
 Notes:
 
 - `video_onnx_stream.py` only supports frame directories.
 - `video_onnx.py` generates motion maps for the whole sequence first, then runs batched prediction.
 - `video_onnx_stream.py` generates motion maps frame by frame and resets motion state when it enters a new subdirectory.
+- The script prints an end-to-end FPS summary at the end, covering frame-wise motion generation, inference, and result saving.
 - Outputs are saved as annotated images under `images/` and frame-level JSON under `json/`.
 
 ## Reproducibility Notes

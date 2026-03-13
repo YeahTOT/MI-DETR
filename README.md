@@ -218,6 +218,39 @@ Outputs are saved to `runs/pred/<name>` and include:
 - a JSON file with class IDs, class names, confidence scores, and pixel-space `xyxy` boxes
 - terminal summaries of the detections
 
+## ONNX Export
+
+Use `export.py` to export the released PyTorch checkpoint to ONNX.
+
+```bash
+python export.py \
+  --weights checkpoints/DAUB-R.pt \
+  --output checkpoints/DAUB-R.onnx \
+  --imgsz 512
+```
+
+This requires `onnx`. If graph simplification is enabled, install `onnxruntime` as well.
+
+## ONNX Frame-Sequence Prediction
+
+Use `video_onnx.py` for ONNX inference on a frame directory. The script copies the appearance frames into a run
+directory, generates paired motion maps under `input/image/`, and saves the annotated detection images.
+
+```bash
+python video_onnx.py \
+  --weights checkpoints/DAUB-R.onnx \
+  --source /home/tot/project/VT5025-2512/obj_det/MI-DETR/datasets/infers/1 \
+  --imgsz 512 \
+  --conf 0.1 \
+  --name daub-r_onnx
+```
+
+Notes:
+
+- `video_onnx.py` only accepts frame directories, not MP4 files.
+- `video.py` remains the entry point for PyTorch checkpoints and MP4-based workflows.
+- ONNX inference depends on both `onnx` and `onnxruntime`.
+
 ## Reproducibility Notes
 
 To stay close to the paper setting:

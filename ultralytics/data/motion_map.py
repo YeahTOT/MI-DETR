@@ -168,7 +168,8 @@ def save_motion_image(path: str | Path, motion: torch.Tensor, save_rgb: bool = T
 
 def _conv2d_same(x: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
     kernel_4d = kernel.to(dtype=x.dtype, device=x.device).view(1, 1, kernel.shape[0], kernel.shape[1])
-    return F.conv2d(x, kernel_4d, padding=kernel.shape[0] // 2)
+    padding = (int(kernel_4d.shape[-2] // 2), int(kernel_4d.shape[-1] // 2))
+    return F.conv2d(x, kernel_4d, padding=padding)
 
 
 def _sobel_magnitude(x: torch.Tensor) -> torch.Tensor:

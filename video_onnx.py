@@ -3,33 +3,26 @@ import warnings
 from pathlib import Path
 
 from ultralytics import RTDETR
-from ultralytics.data.utils import VID_FORMATS
 from ultralytics.utils.files import increment_path
-from video_pipeline import (
-    build_source_list_file,
-    generate_motion_maps,
-    prepare_images_from_directory,
-    prepare_images_from_video,
-)
+from video_pipeline import build_source_list_file, generate_motion_maps, prepare_images_from_directory
 
 warnings.filterwarnings("ignore")
 
-DEFAULT_WEIGHTS = "checkpoints/DAUB-R.pt"
+DEFAULT_WEIGHTS = "checkpoints/DAUB-R.onnx"
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Run MI-DETR inference for frame directories or MP4 videos.")
-    parser.add_argument("--weights", default=DEFAULT_WEIGHTS, help="Checkpoint path.")
-    parser.add_argument("--source", required=True, help="Frame directory or MP4 video path.")
+    parser = argparse.ArgumentParser(description="Run MI-DETR ONNX inference for frame directories.")
+    parser.add_argument("--weights", default=DEFAULT_WEIGHTS, help="ONNX checkpoint path.")
+    parser.add_argument("--source", required=True, help="Frame directory path.")
     parser.add_argument("--motion-mode", choices=("reference", "onnx"), default="reference", help="Motion-map backend.")
     parser.add_argument("--recursive", action="store_true", help="Recursively scan frame directories.")
     parser.add_argument("--device", default="", help="Prediction device, e.g. '0'.")
     parser.add_argument("--imgsz", type=int, default=512, help="Input image size.")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold.")
-    parser.add_argument("--project", default="runs/video", help="Directory to save prediction runs.")
+    parser.add_argument("--project", default="runs/video_onnx", help="Directory to save prediction runs.")
     parser.add_argument("--name", default="mi-detr", help="Run name.")
     parser.add_argument("--exist-ok", action="store_true", help="Reuse the run directory if it already exists.")
-    parser.add_argument("--frame-ext", default="jpg", help="Frame extension for extracted videos.")
     parser.add_argument("--save-rgb", dest="save_rgb", action="store_true", help="Save motion maps as 3-channel PNGs.")
     parser.add_argument(
         "--no-save-rgb",
@@ -41,27 +34,19 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def is_video_file(path: Path) -> bool:
-    return path.suffix.lower().lstrip(".") in VID_FORMATS
-
-
-def main(argv=None):
+def main(argv=None) -> Path:
     args = parse_args(argv)
     source = Path(args.source).expanduser().resolve()
     if not source.exists():
         raise FileNotFoundError(f"Source not found: {source}")
+    if not source.is_dir():
+        raise ValueError(f"仅支持帧目录输入: {source}")
 
     run_dir = increment_path(Path(args.project).expanduser() / args.name, exist_ok=args.exist_ok, mkdir=True).resolve()
     images_root = run_dir / "input" / "images"
     motion_root = run_dir / "input" / "image"
 
-    if source.is_dir():
-        frame_paths = prepare_images_from_directory(source, images_root, recursive=args.recursive)
-    elif source.is_file() and is_video_file(source):
-        frame_paths = prepare_images_from_video(source, images_root, frame_ext=args.frame_ext)
-    else:
-        raise ValueError(f"Unsupported source: {source}. Please provide a frame directory or a supported video file.")
-
+    frame_paths = prepare_images_from_directory(source, images_root, recursive=args.recursive)
     source_list = build_source_list_file(frame_paths, run_dir / "input" / "source.txt")
     written = generate_motion_maps(
         images_root=images_root,
@@ -72,7 +57,7 @@ def main(argv=None):
     )
     print(f"Saved {written} motion maps to: {motion_root}")
 
-    model = RTDETR(args.weights)
+    model = RTDETR(str(Path(args.weights).expanduser().resolve()))
     result_count = 0
     for _ in model.predict(
         source=str(source_list),

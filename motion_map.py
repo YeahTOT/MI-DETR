@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", required=True, help="Output root, usually an image/ directory.")
     parser.add_argument("--mode", choices=("reference", "onnx"), default="reference", help="Generation backend.")
     parser.add_argument("--recursive", action="store_true", help="Traverse source-root recursively.")
-    parser.add_argument("--save-rgb", dest="save_rgb", action="store_true", help="Save motion maps as 3-channel PNGs.")
+    parser.add_argument("--save-rgb", dest="save_rgb", action="store_true", help="Save motion camaps as 3-channel PNGs.")
     parser.add_argument(
         "--no-save-rgb",
         dest="save_rgb",
